@@ -18,6 +18,7 @@ type TestWatcher struct {
 	fileFilter    func(string) bool
 	watcher       *fsnotify.Watcher
 	stopChan      chan struct{}
+	withCoverage  bool
 }
 
 // NewTestWatcher creates a new test watcher for the specified directory
@@ -41,8 +42,9 @@ func NewTestWatcher(watchDir string) (*TestWatcher, error) {
 		fileFilter: func(path string) bool {
 			return filepath.Ext(path) == ".go"
 		},
-		watcher:  watcher,
-		stopChan: make(chan struct{}),
+		watcher:      watcher,
+		stopChan:     make(chan struct{}),
+		withCoverage: false,
 	}, nil
 }
 
@@ -56,10 +58,22 @@ func (tw *TestWatcher) SetFileFilter(filter func(string) bool) {
 	tw.fileFilter = filter
 }
 
+// EnableCoverage enables test coverage reporting
+func (tw *TestWatcher) EnableCoverage(enabled bool) {
+	tw.withCoverage = enabled
+}
+
 // RunTests runs the go tests in the watch directory
 func (tw *TestWatcher) RunTests() error {
 	fmt.Println("Running tests...")
-	cmd := exec.Command("go", "test", "./...")
+
+	args := []string{"test", "./..."}
+	if tw.withCoverage {
+		args = append(args, "-cover")
+		fmt.Println("Coverage reporting enabled")
+	}
+
+	cmd := exec.Command("go", args...)
 	cmd.Dir = tw.watchDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

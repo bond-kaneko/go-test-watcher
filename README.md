@@ -8,6 +8,8 @@ A simple command-line tool that watches Go files for changes and automatically r
 - Automatically runs tests when files are modified
 - Debounces test runs to prevent multiple runs for rapid changes
 - Customizable file filtering
+- Audio notification (bell) when tests fail
+- Optional test coverage reporting
 
 ## Installation
 
@@ -36,29 +38,36 @@ This will:
 go-test-watcher [options]
 
 Options:
-  -dir string
+  -r string
         Directory to watch (default: current directory)
-  -delay duration
+  -d duration
         Debounce delay for running tests after changes (default: 500ms)
-  -filter string
-        File filter pattern (e.g., "*.go", "*_test.go")
+  -f string
+        File filter pattern (e.g., "*.go", "*_test.go") (default: "*.go")
+  -c
+        Enable test coverage reporting
 ```
 
 ### Examples
 
 Watch a specific directory:
 ```bash
-go-test-watcher -dir /path/to/your/project
+go-test-watcher -r /path/to/your/project
 ```
 
 Use a longer debounce delay (for projects with frequent changes):
 ```bash
-go-test-watcher -delay 2s
+go-test-watcher -d 2s
 ```
 
 Only watch test files:
 ```bash
-go-test-watcher -filter "*_test.go"
+go-test-watcher -f "*_test.go"
+```
+
+Run with test coverage reporting:
+```bash
+go-test-watcher -c
 ```
 
 ## For Developers
@@ -72,7 +81,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/bond-kaneko/go-test-watcher/watcher"
 )
@@ -86,10 +97,13 @@ func main() {
 	}
 
 	// Optional custom configuration
-	// testWatcher.SetDebounceDelay(1 * time.Second)
-	// testWatcher.SetFileFilter(func(path string) bool {
-	//     return strings.HasSuffix(path, "_test.go")
-	// })
+	 testWatcher.SetDebounceDelay(1 * time.Second) // Change debounce delay
+	 testWatcher.SetFileFilter(func(path string) bool { // Example custom filter
+	     // Only watch files ending with _test.go using glob pattern matching
+	     matched, _ := filepath.Match("*_test.go", filepath.Base(path))
+	     return matched
+	 })
+	// testWatcher.EnableCoverage(true) // Enable test coverage reporting
 
 	// Set up signal handling for graceful shutdown
 	signalChan := make(chan os.Signal, 1)
