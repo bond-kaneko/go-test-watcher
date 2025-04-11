@@ -46,6 +46,8 @@ Options:
         File filter pattern (e.g., "*.go", "*_test.go") (default: "*.go")
   -c
         Enable test coverage reporting
+  -v
+        Display version information
 ```
 
 ### Examples
@@ -68,6 +70,11 @@ go-test-watcher -f "*_test.go"
 Run with test coverage reporting:
 ```bash
 go-test-watcher -c
+```
+
+Display version:
+```bash
+go-test-watcher -v
 ```
 
 ## For Developers
@@ -123,6 +130,17 @@ func main() {
 	testWatcher.Stop()
 }
 ```
+
+## Building from Source
+
+To build the tool with the current Git tag as the version:
+
+```bash
+git_tag=$(git describe --tags --always --dirty)
+go build -ldflags="-X 'main.Version=${git_tag}'" -o go-test-watcher
+```
+
+This will embed the Git tag (e.g., v1.0.0) into the binary as the version information, which will be displayed when using the `-v` flag.
 
 ## License
 

@@ -12,13 +12,25 @@ import (
 	"github.com/bond-kaneko/go-test-watcher/watcher"
 )
 
+// Version information - will be set by the build process
+var (
+	Version = "dev"
+)
+
 func main() {
 	// Configure command line arguments
+	versionFlag := flag.Bool("v", false, "Display version information")
 	coverageFlag := flag.Bool("c", false, "Enable test coverage reporting")
 	dirFlag := flag.String("r", "", "Directory to watch (default: current directory)")
 	delayFlag := flag.Duration("d", 500*time.Millisecond, "Debounce delay for running tests after changes")
 	filterFlag := flag.String("f", "*.go", "File filter pattern (e.g., \"*.go\", \"*_test.go\")")
 	flag.Parse()
+
+	// Display version if requested
+	if *versionFlag {
+		fmt.Printf("go-test-watcher version %s\n", Version)
+		return
+	}
 
 	// Create a new test watcher for the current directory
 	testWatcher, err := watcher.NewTestWatcher(*dirFlag)
