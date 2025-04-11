@@ -66,6 +66,8 @@ func (tw *TestWatcher) RunTests() error {
 
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("Error running tests: %v\n", err)
+		// Play a bell sound to notify user of test failure
+		fmt.Print("\a")
 		return err
 	}
 	fmt.Println("Tests completed")
