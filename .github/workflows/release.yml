@@ -60,10 +60,21 @@ jobs:
         with:
           go-version: '1.21'
       
+      - name: Get version (Unix)
+        if: runner.os != 'Windows'
+        id: get_version_unix
+        run: echo "VERSION=$(git describe --tags --always --dirty)" >> $GITHUB_ENV
+      
+      - name: Get version (Windows)
+        if: runner.os == 'Windows'
+        id: get_version_windows
+        run: |
+          $version = git describe --tags --always --dirty
+          echo "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      
       - name: Build binary
         run: |
-          VERSION=$(git describe --tags --always --dirty)
-          go build -ldflags="-X 'main.Version=${VERSION}'" -o ${{ matrix.artifact_name }}
+          go build -ldflags="-X 'main.Version=${{ env.VERSION }}'" -o ${{ matrix.artifact_name }}
       
       - name: Upload asset to release
         uses: softprops/action-gh-release@v1
