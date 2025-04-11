@@ -17,6 +17,8 @@ A simple command-line tool that watches Go files for changes and automatically r
 go install github.com/bond-kaneko/go-test-watcher@latest
 ```
 
+Or download the pre-built binary for your platform from the [Releases](https://github.com/bond-kaneko/go-test-watcher/releases) page.
+
 ## Usage
 
 ### Basic Usage
@@ -141,6 +143,26 @@ go build -ldflags="-X 'main.Version=${git_tag}'" -o go-test-watcher
 ```
 
 This will embed the Git tag (e.g., v1.0.0) into the binary as the version information, which will be displayed when using the `-v` flag.
+
+## Releasing
+
+This project uses GitHub Actions to automatically build and release binaries when a new tag is pushed.
+
+To create a new release:
+
+1. Create and push a new tag:
+```bash
+git tag -a v1.0.0 -m "Release v1.0.0"
+git push origin v1.0.0
+```
+
+2. GitHub Actions will automatically:
+   - Run tests
+   - Create a new release
+   - Build binaries for Linux, macOS, and Windows
+   - Attach the binaries to the release
+
+The binaries will be available for download from the [Releases](https://github.com/bond-kaneko/go-test-watcher/releases) page.
 
 ## License
 
