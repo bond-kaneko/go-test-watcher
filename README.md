@@ -1,6 +1,6 @@
 # Go Test Watcher
 
-A simple library to watch Go files for changes and automatically run tests when changes are detected.
+A simple command-line tool that watches Go files for changes and automatically runs tests when changes are detected.
 
 ## Features
 
@@ -12,12 +12,58 @@ A simple library to watch Go files for changes and automatically run tests when 
 ## Installation
 
 ```bash
-go get github.com/bond-kaneko/go-test-watcher
+go install github.com/bond-kaneko/go-test-watcher@latest
 ```
 
 ## Usage
 
 ### Basic Usage
+
+Simply run the tool in your directory to start watching for file changes:
+
+```bash
+go-test-watcher
+```
+
+This will:
+1. Monitor all `.go` files in the current directory
+2. Automatically run `go test ./...` when files change
+3. Exit with Ctrl+C
+
+### Command Line Options
+
+```bash
+go-test-watcher [options]
+
+Options:
+  -dir string
+        Directory to watch (default: current directory)
+  -delay duration
+        Debounce delay for running tests after changes (default: 500ms)
+  -filter string
+        File filter pattern (e.g., "*.go", "*_test.go")
+```
+
+### Examples
+
+Watch a specific directory:
+```bash
+go-test-watcher -dir /path/to/your/project
+```
+
+Use a longer debounce delay (for projects with frequent changes):
+```bash
+go-test-watcher -delay 2s
+```
+
+Only watch test files:
+```bash
+go-test-watcher -filter "*_test.go"
+```
+
+## For Developers
+
+You can also use this tool as a library in your own Go projects:
 
 ```go
 package main
@@ -39,6 +85,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Optional custom configuration
+	// testWatcher.SetDebounceDelay(1 * time.Second)
+	// testWatcher.SetFileFilter(func(path string) bool {
+	//     return strings.HasSuffix(path, "_test.go")
+	// })
+
 	// Set up signal handling for graceful shutdown
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
@@ -56,23 +108,6 @@ func main() {
 	fmt.Println("\nShutting down...")
 	testWatcher.Stop()
 }
-```
-
-### Advanced Usage
-
-You can customize the behavior of the test watcher:
-
-```go
-// Create a watcher for a specific directory
-testWatcher, err := watcher.NewTestWatcher("/path/to/your/project")
-
-// Set a custom debounce delay
-testWatcher.SetDebounceDelay(1 * time.Second)
-
-// Set a custom file filter (only watch test files)
-testWatcher.SetFileFilter(func(path string) bool {
-    return strings.HasSuffix(path, "_test.go")
-})
 ```
 
 ## License
