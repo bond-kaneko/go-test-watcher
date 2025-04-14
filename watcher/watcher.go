@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/gosuri/uilive"
 )
 
 // TestWatcher watches for file changes and runs tests
@@ -19,6 +21,7 @@ type TestWatcher struct {
 	watcher       *fsnotify.Watcher
 	stopChan      chan struct{}
 	withCoverage  bool
+	writer        *uilive.Writer
 }
 
 // NewTestWatcher creates a new test watcher for the specified directory
@@ -36,6 +39,9 @@ func NewTestWatcher(watchDir string) (*TestWatcher, error) {
 		return nil, fmt.Errorf("failed to initialize watcher: %w", err)
 	}
 
+	writer := uilive.New()
+	writer.RefreshInterval = time.Millisecond * 100
+
 	return &TestWatcher{
 		watchDir:      watchDir,
 		debounceDelay: 500 * time.Millisecond,
@@ -45,6 +51,7 @@ func NewTestWatcher(watchDir string) (*TestWatcher, error) {
 		watcher:      watcher,
 		stopChan:     make(chan struct{}),
 		withCoverage: false,
+		writer:       writer,
 	}, nil
 }
 
@@ -65,26 +72,127 @@ func (tw *TestWatcher) EnableCoverage(enabled bool) {
 
 // RunTests runs the go tests in the watch directory
 func (tw *TestWatcher) RunTests() error {
-	fmt.Println("Running tests...")
+	fmt.Fprintf(tw.writer, "Running tests...\n")
+	tw.writer.Flush()
 
-	args := []string{"test", "./..."}
+	args := []string{"test", "./...", "-v=true"} // Enable verbosity for more detailed output
 	if tw.withCoverage {
 		args = append(args, "-cover")
-		fmt.Println("Coverage reporting enabled")
 	}
 
 	cmd := exec.Command("go", args...)
 	cmd.Dir = tw.watchDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("Error running tests: %v\n", err)
-		// Play a bell sound to notify user of test failure
-		fmt.Print("\a")
+	// Capture all output
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	// Run the command
+	err := cmd.Run()
+
+	// Parse the output to get a summary
+	outputStr := output.String()
+	if err != nil {
+		// Get the number of failing tests
+		failCount := strings.Count(outputStr, "--- FAIL")
+		packageName := "unknown"
+
+		// Extract test failures
+		var failures []string
+		lines := strings.Split(outputStr, "\n")
+		inFailBlock := false
+
+		for _, line := range lines {
+			// Get package name
+			if strings.HasPrefix(line, "FAIL\t") {
+				parts := strings.Fields(line)
+				if len(parts) > 1 {
+					packageName = parts[1]
+				}
+				continue
+			}
+
+			// Collect failure details
+			if strings.HasPrefix(line, "--- FAIL") {
+				inFailBlock = true
+				failures = append(failures, line)
+				continue
+			}
+
+			if inFailBlock {
+				if strings.HasPrefix(line, "    ") { // Test failure details indented with spaces
+					failures = append(failures, line)
+				} else if line == "" {
+					// Empty line after failure block
+					inFailBlock = false
+				}
+			}
+		}
+
+		// Show detailed failure summary
+		fmt.Fprintf(tw.writer, "TEST FAILED: %d tests in %s\n", failCount, packageName)
+
+		// Display failure details
+		if len(failures) > 0 {
+			fmt.Fprintf(tw.writer, "\nFailure Details:\n")
+			for _, failure := range failures {
+				fmt.Fprintf(tw.writer, "%s\n", failure)
+			}
+		}
+
+		tw.writer.Flush()
+		fmt.Print("\a") // Play bell sound
 		return err
 	}
-	fmt.Println("Tests completed")
+
+	// For successful tests
+	packageName := "unknown"
+	duration := "unknown"
+	coverage := ""
+
+	lines := strings.Split(outputStr, "\n")
+	for _, line := range lines {
+		// Check for test result line
+		if strings.HasPrefix(line, "ok") {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				packageName = parts[1]
+				duration = parts[2]
+
+				// Look for coverage information
+				if tw.withCoverage && len(parts) >= 4 {
+					for i, part := range parts {
+						if strings.Contains(part, "coverage") || strings.HasSuffix(part, "%") {
+							// Coverage information found
+							coverage = strings.Join(parts[i:], " ")
+							break
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+
+	if tw.withCoverage && coverage == "" {
+		// Try to find coverage information in another line
+		for _, line := range lines {
+			if strings.Contains(line, "coverage") {
+				coverage = strings.TrimSpace(line)
+				break
+			}
+		}
+	}
+
+	// Format the success message with coverage information if available
+	testResult := fmt.Sprintf("TEST PASSED: %s (%s)", packageName, duration)
+	if coverage != "" {
+		testResult += fmt.Sprintf(" - %s", coverage)
+	}
+
+	fmt.Fprintf(tw.writer, "%s\n", testResult)
+	tw.writer.Flush()
 	return nil
 }
 
@@ -108,6 +216,10 @@ func (tw *TestWatcher) Watch() error {
 	}
 
 	fmt.Println("Watching for file changes. Press Ctrl+C to exit.")
+
+	// Start the live writer
+	tw.writer.Start()
+	defer tw.writer.Stop()
 
 	// Run tests immediately on startup
 	tw.RunTests()
@@ -135,7 +247,9 @@ func (tw *TestWatcher) Watch() error {
 					}
 					// Debounce to run tests only once for multiple changes
 					debounceTimer = time.AfterFunc(tw.debounceDelay, func() {
-						fmt.Printf("\n%s changed. Running tests again.\n", event.Name)
+						// Show which file changed
+						fmt.Fprintf(tw.writer, "%s changed. Running tests again.\n", event.Name)
+						tw.writer.Flush()
 						tw.RunTests()
 					})
 				}
@@ -145,7 +259,8 @@ func (tw *TestWatcher) Watch() error {
 			if !ok {
 				return nil
 			}
-			fmt.Printf("Watch error: %v\n", err)
+			fmt.Fprintf(tw.writer, "Watch error: %v\n", err)
+			tw.writer.Flush()
 		}
 	}
 }
@@ -154,4 +269,5 @@ func (tw *TestWatcher) Watch() error {
 func (tw *TestWatcher) Stop() {
 	close(tw.stopChan)
 	tw.watcher.Close()
+	tw.writer.Stop()
 }
