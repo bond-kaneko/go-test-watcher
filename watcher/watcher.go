@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -22,6 +23,7 @@ type TestWatcher struct {
 	stopChan      chan struct{}
 	withCoverage  bool
 	writer        *uilive.Writer
+	changedFiles  []string
 }
 
 // NewTestWatcher creates a new test watcher for the specified directory
@@ -70,12 +72,77 @@ func (tw *TestWatcher) EnableCoverage(enabled bool) {
 	tw.withCoverage = enabled
 }
 
-// RunTests runs the go tests in the watch directory
-func (tw *TestWatcher) RunTests() error {
-	fmt.Fprintf(tw.writer, "Running tests...\n")
+// RunTests runs the go tests for the specified files
+func (tw *TestWatcher) RunTests(changedFiles []string) error {
+	var testDir string
+	var testPattern string
+
+	if len(changedFiles) == 0 {
+		// Run all tests if no specific file is provided
+		fmt.Fprintf(tw.writer, "Running all tests...\n")
+		testDir = "./..."
+		testPattern = ""
+	} else {
+		// One or more files changed - collect all unique directories
+		dirs := make(map[string]bool)
+
+		if len(changedFiles) == 1 {
+			fmt.Fprintf(tw.writer, "Running tests related to %s...\n", changedFiles[0])
+		} else {
+			fmt.Fprintf(tw.writer, "Running tests related to %d changed files...\n", len(changedFiles))
+		}
+
+		// Special handling for single test files
+		var singleTestFile string
+
+		for _, changedFile := range changedFiles {
+			// Find the directory of the changed file
+			dir := filepath.Dir(changedFile)
+			// Make the path relative to the watch directory if needed
+			relDir, err := filepath.Rel(tw.watchDir, dir)
+			if err != nil {
+				relDir = dir
+			}
+			if relDir == "." {
+				relDir = "./"
+			}
+
+			dirs[relDir] = true
+
+			// If there's only one file and it's a test file, remember it for test pattern
+			if len(changedFiles) == 1 {
+				base := filepath.Base(changedFile)
+				baseWithoutExt := strings.TrimSuffix(base, filepath.Ext(base))
+				if strings.HasSuffix(baseWithoutExt, "_test") {
+					singleTestFile = baseWithoutExt
+				}
+			}
+		}
+
+		// If we have just one directory affected, test just that directory
+		if len(dirs) == 1 {
+			for dir := range dirs {
+				testDir = "./" + dir
+			}
+		} else {
+			// Multiple directories affected, run all tests
+			testDir = "./..."
+		}
+
+		// Set test pattern only if dealing with a single test file
+		if singleTestFile != "" {
+			testPattern = singleTestFile
+		} else {
+			testPattern = ""
+		}
+	}
+
 	tw.writer.Flush()
 
-	args := []string{"test", "./...", "-v=true"} // Enable verbosity for more detailed output
+	args := []string{"test", testDir, "-v=true"}
+	if testPattern != "" {
+		args = append(args, "-run="+testPattern)
+	}
 	if tw.withCoverage {
 		args = append(args, "-cover")
 	}
@@ -307,9 +374,11 @@ func (tw *TestWatcher) Watch() error {
 	defer tw.writer.Stop()
 
 	// Run tests immediately on startup
-	tw.RunTests()
+	tw.RunTests(nil)
 
 	var debounceTimer *time.Timer
+	var pendingChanges []string
+	var changesLock sync.Mutex
 
 	// Event processing
 	for {
@@ -326,17 +395,51 @@ func (tw *TestWatcher) Watch() error {
 				event.Op&fsnotify.Create == fsnotify.Create {
 				// Apply file filter
 				if tw.fileFilter(event.Name) {
+					// Add the file to pending changes
+					changesLock.Lock()
+
+					// Check if this file is already in the pending changes
+					found := false
+					for _, f := range pendingChanges {
+						if f == event.Name {
+							found = true
+							break
+						}
+					}
+
+					// If not found, add it
+					if !found {
+						pendingChanges = append(pendingChanges, event.Name)
+					}
+
 					// Reset timer if already set
 					if debounceTimer != nil {
 						debounceTimer.Stop()
 					}
+
+					// Create a copy of current pending changes
+					currentChanges := make([]string, len(pendingChanges))
+					copy(currentChanges, pendingChanges)
+
 					// Debounce to run tests only once for multiple changes
 					debounceTimer = time.AfterFunc(tw.debounceDelay, func() {
-						// Show which file changed
-						fmt.Fprintf(tw.writer, "%s changed. Running tests again.\n", event.Name)
+						changesLock.Lock()
+						// Show which files changed
+						if len(currentChanges) == 1 {
+							fmt.Fprintf(tw.writer, "%s changed. Running tests again.\n", currentChanges[0])
+						} else {
+							fmt.Fprintf(tw.writer, "%d files changed. Running tests again.\n", len(currentChanges))
+						}
+
+						// Clear pending changes
+						pendingChanges = nil
+						changesLock.Unlock()
+
 						tw.writer.Flush()
-						tw.RunTests()
+						tw.RunTests(currentChanges)
 					})
+
+					changesLock.Unlock()
 				}
 			}
 
