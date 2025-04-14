@@ -19,7 +19,6 @@ type TestWatcher struct {
 	debounceDelay time.Duration
 	fileFilter    func(string) bool
 	watcher       *fsnotify.Watcher
-	stopChan      chan struct{}
 	withCoverage  bool
 	writer        *uilive.Writer
 }
@@ -49,7 +48,6 @@ func NewTestWatcher(watchDir string) (*TestWatcher, error) {
 			return filepath.Ext(path) == ".go"
 		},
 		watcher:      watcher,
-		stopChan:     make(chan struct{}),
 		withCoverage: false,
 		writer:       writer,
 	}, nil
@@ -304,7 +302,6 @@ func (tw *TestWatcher) Watch() error {
 
 	// Start the live writer
 	tw.writer.Start()
-	defer tw.writer.Stop()
 
 	// Run tests immediately on startup
 	tw.RunTests()
@@ -314,9 +311,6 @@ func (tw *TestWatcher) Watch() error {
 	// Event processing
 	for {
 		select {
-		case <-tw.stopChan:
-			return nil
-
 		case event, ok := <-tw.watcher.Events:
 			if !ok {
 				return nil
@@ -352,7 +346,5 @@ func (tw *TestWatcher) Watch() error {
 
 // Stop stops the test watcher
 func (tw *TestWatcher) Stop() {
-	close(tw.stopChan)
-	tw.watcher.Close()
-	tw.writer.Stop()
+	os.Exit(0)
 }

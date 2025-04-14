@@ -4,9 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/bond-kaneko/go-test-watcher/watcher"
@@ -60,20 +58,10 @@ func main() {
 		fmt.Println("Test coverage reporting enabled")
 	}
 
-	// Set up signal handling for graceful shutdown
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
-
-	// Start watching in a goroutine
 	go func() {
 		if err := testWatcher.Watch(); err != nil {
 			fmt.Printf("Error watching: %v\n", err)
 			os.Exit(1)
 		}
 	}()
-
-	// Wait for interrupt signal
-	<-signalChan
-	fmt.Println("\nShutting down...")
-	testWatcher.Stop()
 }
