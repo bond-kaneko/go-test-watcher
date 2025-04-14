@@ -101,9 +101,9 @@ func (tw *TestWatcher) RunTests() error {
 		// Extract test failures
 		var failures []string
 		lines := strings.Split(outputStr, "\n")
-		inFailBlock := false
+		var currentFailure string
 
-		for _, line := range lines {
+		for i, line := range lines {
 			// Get package name
 			if strings.HasPrefix(line, "FAIL\t") {
 				parts := strings.Fields(line)
@@ -113,19 +113,28 @@ func (tw *TestWatcher) RunTests() error {
 				continue
 			}
 
-			// Collect failure details
+			// Collect all failure details
 			if strings.HasPrefix(line, "--- FAIL") {
-				inFailBlock = true
-				failures = append(failures, line)
-				continue
-			}
+				// Start tracking a new failure
+				currentFailure = line
+				failures = append(failures, currentFailure)
 
-			if inFailBlock {
-				if strings.HasPrefix(line, "    ") { // Test failure details indented with spaces
-					failures = append(failures, line)
-				} else if line == "" {
-					// Empty line after failure block
-					inFailBlock = false
+				// Look ahead for error details after this line
+				for j := i + 1; j < len(lines) && j < i+10; j++ {
+					nextLine := lines[j]
+					// Indented lines are error details
+					if strings.HasPrefix(nextLine, "    ") {
+						failures = append(failures, nextLine)
+					} else if strings.HasPrefix(nextLine, "=== ") || strings.HasPrefix(nextLine, "--- ") {
+						// Stop when we hit the next test section
+						break
+					} else if nextLine == "" {
+						// Empty lines are fine to include
+						continue
+					} else if !strings.HasPrefix(nextLine, "FAIL\t") && len(nextLine) > 0 {
+						// Include non-empty lines that aren't starting a new section
+						failures = append(failures, "    "+nextLine)
+					}
 				}
 			}
 		}
@@ -133,9 +142,81 @@ func (tw *TestWatcher) RunTests() error {
 		// Show detailed failure summary
 		fmt.Fprintf(tw.writer, "TEST FAILED: %d tests in %s\n", failCount, packageName)
 
-		// Display failure details
-		if len(failures) > 0 {
-			fmt.Fprintf(tw.writer, "\nFailure Details:\n")
+		// Display the raw test output for more complete information
+		fmt.Fprintf(tw.writer, "\nFailure Details:\n")
+
+		// Parse output to find the test result sections
+		var testSections []string
+		inTestSection := false
+		var currentSection strings.Builder
+
+		for _, line := range lines {
+			if strings.HasPrefix(line, "=== RUN") {
+				// Start of a new test section
+				if inTestSection && currentSection.Len() > 0 {
+					testSections = append(testSections, currentSection.String())
+				}
+				inTestSection = true
+				currentSection.Reset()
+				currentSection.WriteString(line)
+				currentSection.WriteString("\n")
+			} else if inTestSection {
+				currentSection.WriteString(line)
+				currentSection.WriteString("\n")
+
+				// End of a test section
+				if strings.HasPrefix(line, "--- FAIL") || strings.HasPrefix(line, "--- PASS") {
+					// Only add failed tests to our sections
+					if strings.HasPrefix(line, "--- FAIL") {
+						testSections = append(testSections, currentSection.String())
+					}
+					inTestSection = false
+					currentSection.Reset()
+				}
+			}
+		}
+
+		// Add any remaining section
+		if inTestSection && currentSection.Len() > 0 {
+			testSections = append(testSections, currentSection.String())
+		}
+
+		// Display failure details more completely
+		for _, section := range testSections {
+			if strings.Contains(section, "--- FAIL") {
+				fmt.Fprintf(tw.writer, "%s\n", section)
+
+				// Find any error output lines after the failure
+				sectionLines := strings.Split(section, "\n")
+				testName := ""
+
+				// Extract test name
+				for _, line := range sectionLines {
+					if strings.HasPrefix(line, "=== RUN") {
+						parts := strings.Fields(line)
+						if len(parts) >= 3 {
+							testName = parts[2]
+						}
+					}
+				}
+
+				// If we have a test name, look for any t.Error/t.Errorf/t.Fatal lines in the output
+				if testName != "" {
+					for _, line := range lines {
+						// Match log output associated with this test
+						if strings.Contains(line, testName+":") &&
+							(strings.Contains(line, "Error") ||
+								strings.Contains(line, "Fatal") ||
+								strings.Contains(line, "Fail")) {
+							fmt.Fprintf(tw.writer, "    %s\n", strings.TrimSpace(line))
+						}
+					}
+				}
+			}
+		}
+
+		// If no detailed sections were found, fall back to showing the collected failures
+		if len(testSections) == 0 && len(failures) > 0 {
 			for _, failure := range failures {
 				fmt.Fprintf(tw.writer, "%s\n", failure)
 			}
@@ -147,7 +228,6 @@ func (tw *TestWatcher) RunTests() error {
 	}
 
 	// For successful tests
-	packageName := "unknown"
 	duration := "unknown"
 	coverage := ""
 
@@ -157,8 +237,10 @@ func (tw *TestWatcher) RunTests() error {
 		if strings.HasPrefix(line, "ok") {
 			parts := strings.Fields(line)
 			if len(parts) >= 3 {
-				packageName = parts[1]
 				duration = parts[2]
+				// Remove "(cached)" text if present
+				duration = strings.ReplaceAll(duration, "(cached)", "")
+				duration = strings.TrimSpace(duration)
 
 				// Look for coverage information
 				if tw.withCoverage && len(parts) >= 4 {
@@ -186,7 +268,10 @@ func (tw *TestWatcher) RunTests() error {
 	}
 
 	// Format the success message with coverage information if available
-	testResult := fmt.Sprintf("TEST PASSED: %s (%s)", packageName, duration)
+	testResult := "ALL TESTS PASSED"
+	if duration != "" && duration != "()" {
+		testResult = fmt.Sprintf("ALL TESTS PASSED (%s)", duration)
+	}
 	if coverage != "" {
 		testResult += fmt.Sprintf(" - %s", coverage)
 	}
