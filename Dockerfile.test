@@ -1,0 +1,22 @@
+FROM golang:1.24-alpine
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apk add --no-cache git build-base
+
+# Copy go.mod and go.sum first and download dependencies
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build test application
+RUN go build -o fsnotify-test ./cmd/fsnotify-test
+
+# Create test directory
+RUN mkdir -p /app/testdir
+
+# Test command
+CMD ["./fsnotify-test", "/app/testdir"] 

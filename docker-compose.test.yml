@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  # Test 1: Basic container test
+  basic-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: fsnotify-basic-test
+    volumes:
+      # Mount for logs
+      - ./logs:/app/logs
+
+  # Test 2: With bind mount from host
+  bind-mount-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: fsnotify-bind-mount-test
+    volumes:
+      # Bind mount test directory from host
+      - ./test-mount:/app/testdir
+      - ./logs:/app/logs
+
+  # Test 3: With Docker volume
+  volume-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: fsnotify-volume-test
+    volumes:
+      # Use Docker volume
+      - fsnotify-test-vol:/app/testdir
+      - ./logs:/app/logs
+
+volumes:
+  fsnotify-test-vol:
+    name: fsnotify-test-vol

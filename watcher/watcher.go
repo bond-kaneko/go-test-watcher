@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bond-kaneko/go-test-watcher/filenotify"
 	"github.com/fsnotify/fsnotify"
 	"github.com/gosuri/uilive"
 )
@@ -18,7 +19,7 @@ type TestWatcher struct {
 	watchDir            string
 	debounceDelay       time.Duration
 	fileFilter          func(string) bool
-	watcher             *fsnotify.Watcher
+	watcher             filenotify.FileWatcher
 	withCoverage        bool
 	writer              *uilive.Writer
 	changedFiles        map[string]bool
@@ -37,7 +38,7 @@ func NewTestWatcher(watchDir string) (*TestWatcher, error) {
 		}
 	}
 
-	watcher, err := fsnotify.NewWatcher()
+	watcher, err := filenotify.New()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize watcher: %w", err)
 	}
@@ -58,6 +59,80 @@ func NewTestWatcher(watchDir string) (*TestWatcher, error) {
 		failedTests:         make(map[string]bool),
 		packageDependencies: make(map[string][]string),
 	}, nil
+}
+
+// Watch starts watching for file changes and running tests
+func (tw *TestWatcher) Watch() error {
+	// Add directories to watch (non-recursive)
+	if err := filepath.Walk(tw.watchDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// Skip hidden directories
+		if info.IsDir() {
+			if strings.HasPrefix(info.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return tw.watcher.Add(path)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("error setting up directory watch: %w", err)
+	}
+
+	fmt.Println("Watching for file changes. Press Ctrl+C to exit.")
+
+	// Start the live writer
+	tw.writer.Start()
+
+	// Run tests immediately on startup
+	tw.RunTests()
+
+	var debounceTimer *time.Timer
+
+	// Event processing
+	for {
+		select {
+		case event, ok := <-tw.watcher.Events():
+			if !ok {
+				return nil
+			}
+			// Process write events
+			if event.Has(fsnotify.Write) ||
+				event.Has(fsnotify.Create) {
+				// Apply file filter
+				if tw.fileFilter(event.Name) {
+					// Add the changed file to tracking
+					tw.AddChangedFile(event.Name)
+
+					// Reset timer if already set
+					if debounceTimer != nil {
+						debounceTimer.Stop()
+					}
+					// Debounce to run tests only once for multiple changes
+					debounceTimer = time.AfterFunc(tw.debounceDelay, func() {
+						// Show which file changed
+						fmt.Fprintf(tw.writer, "%s changed. Running tests again.\n", event.Name)
+						tw.writer.Flush()
+						tw.RunTests()
+					})
+				}
+			}
+
+		case err, ok := <-tw.watcher.Errors():
+			if !ok {
+				return nil
+			}
+			fmt.Fprintf(tw.writer, "Watch error: %v\n", err)
+			tw.writer.Flush()
+		}
+	}
+}
+
+// Stop stops the test watcher
+func (tw *TestWatcher) Stop() {
+	tw.watcher.Close()
+	os.Exit(0)
 }
 
 // SetDebounceDelay sets the debounce delay for test runs
@@ -206,220 +281,55 @@ func (tw *TestWatcher) RunTests() error {
 	// Clear tracked changed files after running tests
 	tw.ClearChangedFiles()
 
-	// Count actual failed tests
-	failCount := strings.Count(outputStr, "--- FAIL")
-
-	// If there are no actual failures but err is not nil,
-	// this might be a compile error or another non-test failure
-	if err != nil && failCount == 0 {
-		// Check if this is a build failure
-		if strings.Contains(outputStr, "build failed") || strings.Contains(outputStr, "does not compile") {
-			fmt.Fprintf(tw.writer, "BUILD FAILED:\n%s\n", outputStr)
-			tw.writer.Flush()
-			fmt.Print("\a") // Play bell sound
-			return err
-		}
-
-		// If there's no build failure but also no test failures, treat as success
-		// This can happen with some configurations where exit code is non-zero
-		// but no tests actually failed
-		duration := "unknown"
-		coverage := ""
-
-		lines := strings.Split(outputStr, "\n")
-		for _, line := range lines {
-			// Check for test result line
-			if strings.HasPrefix(line, "ok") {
-				parts := strings.Fields(line)
-				if len(parts) >= 3 {
-					duration = parts[2]
-					// Remove "(cached)" text if present
-					duration = strings.ReplaceAll(duration, "(cached)", "")
-					duration = strings.TrimSpace(duration)
-
-					// Look for coverage information
-					if tw.withCoverage && len(parts) >= 4 {
-						for i, part := range parts {
-							if strings.Contains(part, "coverage") || strings.HasSuffix(part, "%") {
-								// Coverage information found
-								coverage = strings.Join(parts[i:], " ")
-								break
-							}
-						}
-					}
-					break
-				}
-			}
-		}
-
-		// Format the success message
-		testResult := "ALL TESTS PASSED"
-		if duration != "" && duration != "()" {
-			testResult = fmt.Sprintf("ALL TESTS PASSED (%s)", duration)
-		}
-		if coverage != "" {
-			testResult += fmt.Sprintf(" - %s", coverage)
-		}
-
-		fmt.Fprintf(tw.writer, "%s\n", testResult)
-		tw.writer.Flush()
-		return nil
-	}
-
-	if err != nil {
-		packageName := "unknown"
-
-		// Extract test failures
-		var failures []string
-		lines := strings.Split(outputStr, "\n")
-		var currentFailure string
-
-		for i, line := range lines {
-			// Get package name
-			if strings.HasPrefix(line, "FAIL\t") {
-				parts := strings.Fields(line)
-				if len(parts) > 1 {
-					packageName = parts[1]
-				}
-				continue
-			}
-
-			// Collect all failure details and track failed tests
-			if strings.HasPrefix(line, "--- FAIL") {
-				// Extract test name and track it
-				parts := strings.Fields(line)
-				if len(parts) >= 3 {
-					testName := parts[2]
-					// Add package info to the test name
-					if packageName != "unknown" {
-						testName = packageName + "/" + testName
-					}
-					tw.TrackFailedTest(testName)
-				}
-
-				// Start tracking a new failure
-				currentFailure = line
-				failures = append(failures, currentFailure)
-
-				// Look ahead for error details after this line
-				for j := i + 1; j < len(lines) && j < i+10; j++ {
-					nextLine := lines[j]
-					// Indented lines are error details
-					if strings.HasPrefix(nextLine, "    ") {
-						failures = append(failures, nextLine)
-					} else if strings.HasPrefix(nextLine, "=== ") || strings.HasPrefix(nextLine, "--- ") {
-						// Stop when we hit the next test section
-						break
-					} else if nextLine == "" {
-						// Empty lines are fine to include
-						continue
-					} else if !strings.HasPrefix(nextLine, "FAIL\t") && len(nextLine) > 0 {
-						// Include non-empty lines that aren't starting a new section
-						failures = append(failures, "    "+nextLine)
-					}
-				}
-			}
-		}
-
-		// Show detailed failure summary
-		fmt.Fprintf(tw.writer, "TEST FAILED: %d tests in %s\n", failCount, packageName)
-
-		// Display the raw test output for more complete information
-		fmt.Fprintf(tw.writer, "\nFailure Details:\n")
-
-		// Parse output to find the test result sections
-		var testSections []string
-		inTestSection := false
-		var currentSection strings.Builder
-
-		for _, line := range lines {
-			if strings.HasPrefix(line, "=== RUN") {
-				// Start of a new test section
-				if inTestSection && currentSection.Len() > 0 {
-					testSections = append(testSections, currentSection.String())
-				}
-				inTestSection = true
-				currentSection.Reset()
-				currentSection.WriteString(line)
-				currentSection.WriteString("\n")
-			} else if inTestSection {
-				currentSection.WriteString(line)
-				currentSection.WriteString("\n")
-
-				// End of a test section
-				if strings.HasPrefix(line, "--- FAIL") || strings.HasPrefix(line, "--- PASS") {
-					// Only add failed tests to our sections
-					if strings.HasPrefix(line, "--- FAIL") {
-						testSections = append(testSections, currentSection.String())
-					}
-					inTestSection = false
-					currentSection.Reset()
-				}
-			}
-		}
-
-		// Add any remaining section
-		if inTestSection && currentSection.Len() > 0 {
-			testSections = append(testSections, currentSection.String())
-		}
-
-		// Display failure details more completely
-		for _, section := range testSections {
-			if strings.Contains(section, "--- FAIL") {
-				fmt.Fprintf(tw.writer, "%s\n", section)
-
-				// Find any error output lines after the failure
-				sectionLines := strings.Split(section, "\n")
-				testName := ""
-
-				// Extract test name
-				for _, line := range sectionLines {
-					if strings.HasPrefix(line, "=== RUN") {
-						parts := strings.Fields(line)
-						if len(parts) >= 3 {
-							testName = parts[2]
-						}
-					}
-				}
-
-				// If we have a test name, look for any t.Error/t.Errorf/t.Fatal lines in the output
-				if testName != "" {
-					for _, line := range lines {
-						// Match log output associated with this test
-						if strings.Contains(line, testName+":") &&
-							(strings.Contains(line, "Error") ||
-								strings.Contains(line, "Fatal") ||
-								strings.Contains(line, "Fail")) {
-							fmt.Fprintf(tw.writer, "    %s\n", strings.TrimSpace(line))
-						}
-					}
-				}
-			}
-		}
-
-		// If no detailed sections were found, fall back to showing the collected failures
-		if len(testSections) == 0 && len(failures) > 0 {
-			for _, failure := range failures {
-				fmt.Fprintf(tw.writer, "%s\n", failure)
-			}
-		}
-
-		// If no failure details found at all, but there was an error, show the raw output
-		if len(testSections) == 0 && len(failures) == 0 {
-			fmt.Fprintf(tw.writer, "%s\n", outputStr)
-		}
-
+	// Check if this is a build failure
+	if err != nil && strings.Contains(outputStr, "build failed") || strings.Contains(outputStr, "does not compile") {
+		fmt.Fprintf(tw.writer, "BUILD FAILED:\n%s\n", outputStr)
 		tw.writer.Flush()
 		fmt.Print("\a") // Play bell sound
 		return err
 	}
 
-	// For successful tests
-	duration := "unknown"
-	coverage := ""
+	// Count actual failed tests
+	failCount := strings.Count(outputStr, "--- FAIL")
 
+	// Process test results
+	if err != nil || failCount > 0 {
+		handleFailedTests(tw, outputStr)
+		fmt.Print("\a") // Play bell sound
+		return err
+	} else {
+		handleSuccessfulTests(tw, outputStr)
+		return nil
+	}
+}
+
+// handleFailedTests processes and displays failed test results
+func handleFailedTests(tw *TestWatcher, outputStr string) {
+	// Extract test sections for better output formatting
+	testSections := extractTestSections(outputStr)
+
+	fmt.Fprintf(tw.writer, "TEST FAILURES:\n\n")
+
+	if len(testSections) > 0 {
+		// Print each section
+		for _, section := range testSections {
+			fmt.Fprintf(tw.writer, "%s\n\n", section)
+		}
+	} else {
+		// If no specific sections found, show the full output
+		fmt.Fprintf(tw.writer, "%s\n", outputStr)
+	}
+
+	tw.writer.Flush()
+}
+
+// handleSuccessfulTests processes and displays successful test results
+func handleSuccessfulTests(tw *TestWatcher, outputStr string) {
 	// Clear failed tests since all tests passed
 	tw.ClearFailedTests()
+
+	duration := "unknown"
+	coverage := ""
 
 	lines := strings.Split(outputStr, "\n")
 	for _, line := range lines {
@@ -468,78 +378,90 @@ func (tw *TestWatcher) RunTests() error {
 
 	fmt.Fprintf(tw.writer, "%s\n", testResult)
 	tw.writer.Flush()
-	return nil
 }
 
-// Watch starts watching for file changes and running tests
-func (tw *TestWatcher) Watch() error {
-	// Add directories to watch (non-recursive)
-	if err := filepath.Walk(tw.watchDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		// Skip hidden directories
-		if info.IsDir() {
-			if strings.HasPrefix(info.Name(), ".") {
-				return filepath.SkipDir
+// Helper functions for parsing test output
+
+// extractTestSections extracts formatted test sections from the go test output
+func extractTestSections(output string) []string {
+	// First, split the output into lines and locate all test sections
+	lines := strings.Split(output, "\n")
+
+	// Map to hold sections by test name
+	sectionMap := make(map[string][]string)
+
+	// Track current test being processed
+	var currentTest string
+	var currentLines []string
+	inTestSection := false
+
+	// First pass: collect all test sections
+	for _, line := range lines {
+		// Start of a new test section
+		if strings.Contains(line, "=== RUN") {
+			// If we were tracking a previous test, store it
+			if inTestSection && currentTest != "" {
+				sectionMap[currentTest] = currentLines
 			}
-			return tw.watcher.Add(path)
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("error setting up directory watch: %w", err)
-	}
 
-	fmt.Println("Watching for file changes. Press Ctrl+C to exit.")
-
-	// Start the live writer
-	tw.writer.Start()
-
-	// Run tests immediately on startup
-	tw.RunTests()
-
-	var debounceTimer *time.Timer
-
-	// Event processing
-	for {
-		select {
-		case event, ok := <-tw.watcher.Events:
-			if !ok {
-				return nil
+			// Get test name
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				currentTest = parts[2]
+			} else {
+				currentTest = ""
 			}
-			// Process write events
-			if event.Op&fsnotify.Write == fsnotify.Write ||
-				event.Op&fsnotify.Create == fsnotify.Create {
-				// Apply file filter
-				if tw.fileFilter(event.Name) {
-					// Add the changed file to tracking
-					tw.AddChangedFile(event.Name)
 
-					// Reset timer if already set
-					if debounceTimer != nil {
-						debounceTimer.Stop()
-					}
-					// Debounce to run tests only once for multiple changes
-					debounceTimer = time.AfterFunc(tw.debounceDelay, func() {
-						// Show which file changed
-						fmt.Fprintf(tw.writer, "%s changed. Running tests again.\n", event.Name)
-						tw.writer.Flush()
-						tw.RunTests()
-					})
+			// Start new section
+			currentLines = []string{line}
+			inTestSection = true
+			continue
+		}
+
+		// End of a test section or continuation
+		if inTestSection {
+			currentLines = append(currentLines, line)
+
+			// Check for end of test
+			if strings.Contains(line, "--- FAIL:") || strings.Contains(line, "--- PASS:") {
+				// Mark this line as the end of the test output
+				if currentTest != "" {
+					sectionMap[currentTest] = currentLines
 				}
+			} else if strings.HasPrefix(line, "FAIL") || strings.HasPrefix(line, "ok") || line == "" {
+				// End of section
+				inTestSection = false
+				currentTest = ""
 			}
-
-		case err, ok := <-tw.watcher.Errors:
-			if !ok {
-				return nil
-			}
-			fmt.Fprintf(tw.writer, "Watch error: %v\n", err)
-			tw.writer.Flush()
 		}
 	}
-}
 
-// Stop stops the test watcher
-func (tw *TestWatcher) Stop() {
-	os.Exit(0)
+	// Make sure we store the last test section if we were processing one
+	if inTestSection && currentTest != "" {
+		sectionMap[currentTest] = currentLines
+	}
+
+	// Second pass: identify failed tests
+	var failedTests []string
+
+	for _, line := range lines {
+		if strings.Contains(line, "--- FAIL:") {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				failedTests = append(failedTests, parts[2])
+			}
+		}
+	}
+
+	// Build result with sections for failed tests only
+	var result []string
+	for _, test := range failedTests {
+		if lines, ok := sectionMap[test]; ok {
+			// Join the lines for this test section
+			section := strings.Join(lines, "\n")
+			result = append(result, strings.TrimSpace(section))
+		}
+	}
+
+	return result
 }
